@@ -15,6 +15,11 @@ type PlanSection = {
   description: string;
 };
 
+type InterviewContext = {
+  plan: PlanSection[];
+  coding_question: string;
+};
+
 type ChatMessage = {
   id: string;
   role: "user" | "assistant";
@@ -200,6 +205,7 @@ export default function HomePage() {
   const [resumeError, setResumeError] = useState<string | null>(null);
   const [supplementalInfo, setSupplementalInfo] = useState<string>("");
   const [planSections, setPlanSections] = useState<PlanSection[]>([]);
+  const [codingQuestion, setCodingQuestion] = useState<string>("");
   const [planIteration, setPlanIteration] = useState<number>(0);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [feedbackDraft, setFeedbackDraft] = useState<string>("");
@@ -319,10 +325,13 @@ export default function HomePage() {
         throw new Error(errorData.detail || "Failed to generate plan");
       }
 
-      const plan: PlanSection[] = await response.json();
+      // Destructure the new object
+      const context: InterviewContext = await response.json();
+      const plan = context.plan;
 
       // Success: Update state with real plan from backend
       setPlanSections(plan);
+      setCodingQuestion(context.coding_question);
       setPlanIteration(action.iteration);
       setMessages((prev) => [
         ...prev,
@@ -354,35 +363,6 @@ export default function HomePage() {
       setPendingAction(null);
     }
     // --- End Backend Integration ---
-  };
-
-  const handleFeedbackSubmit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!feedbackDraft.trim() || phase !== "planning") {
-      return;
-    }
-
-    const content = feedbackDraft.trim();
-    const userMessage: ChatMessage = {
-      id: createId("user"),
-      role: "user",
-      content,
-    };
-    const assistantAck: ChatMessage = {
-      id: createId("assistant"),
-      role: "assistant",
-      content:
-        "Heard. Let me reroute the plan with that feedback in mind for the next draft.",
-    };
-
-    setMessages((prev) => [...prev, userMessage, assistantAck]);
-    setFeedbackDraft("");
-    setPendingAction({
-      type: "plan",
-      iteration: planIteration + 1,
-      feedback: content,
-    });
-    setPhase("thinking");
   };
 
   const handleAcceptPlan = () => {
@@ -470,6 +450,7 @@ export default function HomePage() {
     setSupplementalInfo("");
     setPlanSections([]);
     setPlanIteration(0);
+    setCodingQuestion("");
     setMessages([]);
     setFeedbackDraft("");
     setEditorValue(DEFAULT_EDITOR_VALUE);
@@ -673,65 +654,6 @@ export default function HomePage() {
               >
                 Accept plan & start interview
               </button>
-            </section>
-
-            <section className="flex flex-col gap-4 rounded-3xl border border-white/10 bg-slate-900/60 p-6 backdrop-blur">
-              <h3 className="text-lg font-semibold">Refine with the planner</h3>
-              <div className="flex-1 space-y-4 overflow-hidden">
-                <div className="max-h-[360px] overflow-y-auto pr-2">
-                  <div className="space-y-4">
-                    {messages.map((message) => (
-                      <div
-                        key={message.id}
-                        className={`flex ${message.role === "user"
-                          ? "justify-end"
-                          : "justify-start"
-                          }`}
-                      >
-                        <div
-                          className={`max-w-[90%] rounded-2xl border px-4 py-3 text-sm leading-relaxed ${message.role === "user"
-                            ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-100"
-                            : "border-white/10 bg-slate-800/70 text-slate-100"
-                            }`}
-                        >
-                          <p className="text-[10px] font-semibold uppercase tracking-[0.25em] text-slate-400">
-                            {message.role === "user" ? "You" : "Planner"}
-                          </p>
-                          <p className="mt-2 whitespace-pre-wrap">
-                            {message.content}
-                          </p>
-                        </div>
-                      </div>
-                    ))}
-                    <div ref={conversationEndRef} />
-                  </div>
-                </div>
-                <form
-                  onSubmit={handleFeedbackSubmit}
-                  className="space-y-3 rounded-2xl border border-white/10 bg-slate-950/50 p-4"
-                >
-                  <label
-                    htmlFor="plan-feedback"
-                    className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400"
-                  >
-                    Feedback or tweaks
-                  </label>
-                  <textarea
-                    id="plan-feedback"
-                    value={feedbackDraft}
-                    onChange={(event) => setFeedbackDraft(event.target.value)}
-                    placeholder="Ask for different question types, adjust focus areas, or request more/less structure."
-                    className="min-h-[110px] w-full rounded-xl border border-slate-800 bg-slate-900/70 px-4 py-3 text-sm text-slate-100 placeholder:text-slate-500 focus:border-emerald-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
-                  />
-                  <button
-                    type="submit"
-                    disabled={!feedbackDraft.trim()}
-                    className="inline-flex w-full items-center justify-center rounded-full border border-emerald-500/40 bg-emerald-500/15 px-4 py-2 text-sm font-semibold text-emerald-100 transition hover:bg-emerald-500/25 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-slate-800 disabled:text-slate-500"
-                  >
-                    Request plan revision
-                  </button>
-                </form>
-              </div>
             </section>
           </div>
         </div>
