@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
-from typing import Optional
+from pathlib import Path
 
 import modal
-from fastapi import FastAPI, Header, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.staticfiles import StaticFiles
 
-image = modal.Image.debian_slim().pip_install("fastapi[standard]", "pydantic")
+image = modal.Image.debian_slim().pip_install("fastapi[standard]")
 app = modal.App("example-fastapi-app", image=image)
 web_app = FastAPI()
+STATIC_FRONTEND_DIR = Path(__file__).resolve().parent / "static_frontend"
+STATIC_FRONTEND_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class EditorStateStore:
@@ -96,12 +98,6 @@ class VoiceWebSocketSession:
             await self.websocket.send_json(payload)
 
 
-@web_app.get("/")
-async def handle_root(user_agent: Optional[str] = Header(None)):
-    print(f"GET /     - received user_agent={user_agent}")
-    return {"status": "ok"}
-
-
 @web_app.websocket("/voice_ws")
 async def voice_ws(websocket: WebSocket):
     """Bi-directional audio/data channel for speech <-> text processing."""
@@ -110,11 +106,19 @@ async def voice_ws(websocket: WebSocket):
 
 
 @web_app.post("/editor-state")
-async def update_editor_state(payload: str):
+async def update_editor_state(payload: dict):
     """Overwrites the backend's view of the coderpad/editor contents."""
-    await editor_state_store.update(payload)
+    document = payload.get("document")
+    if document is None:
+        raise HTTPException(status_code=400, detail="Missing 'document' field")
+    await editor_state_store.update(document)
     return {"status": "updated"}
 
+web_app.mount(
+    "/",
+    StaticFiles(directory=str(STATIC_FRONTEND_DIR), html=True),
+    name="frontend",
+)
 
 @app.function()
 @modal.asgi_app()
