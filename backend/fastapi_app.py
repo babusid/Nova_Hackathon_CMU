@@ -2,33 +2,42 @@
 # cmd: ["modal", "serve", "07_web_endpoints/fastapi_app.py"]
 # ---
 
-# # Deploy FastAPI app with Modal
-
-# This example shows how you can deploy a [FastAPI](https://fastapi.tiangolo.com/) app with Modal.
-# You can serve any app written in an ASGI-compatible web framework (like FastAPI) using this pattern or you can server WSGI-compatible frameworks like Flask with [`wsgi_app`](https://modal.com/docs/guide/webhooks#wsgi).
-
 from typing import List, Optional
-
-from fastapi.staticfiles import StaticFiles
+import base64
+import os
+import httpx
+import json  # <-- 1. ADDED for safe JSON parsing
 import modal
 from fastapi import FastAPI, Header, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
-image = modal.Image.debian_slim().pip_install("fastapi[standard]", "pydantic", "python-multipart")
-app = modal.App("example-fastapi-app", image=image)
+# -------------------------------
+# Modal setup
+# -------------------------------
+image = (
+    modal.Image.debian_slim()
+    .pip_install("fastapi[standard]", "pydantic", "python-multipart", "httpx")
+)
+app = modal.App(
+    "example-fastapi-app",
+    image=image,
+    secrets=[modal.Secret.from_name("openrouter-secret")]
+)
 web_app = FastAPI()
 
-# Allow requests from your frontend (e.g., http://localhost:3000)
 web_app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # For dev, "*" is fine. For prod, lock this down.
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# -------------------------------
+# Models
+# -------------------------------
 class Item(BaseModel):
     name: str
 
@@ -37,64 +46,148 @@ class PlanSection(BaseModel):
     title: str
     description: str
 
+
+# -------------------------------
+# Routes
+# -------------------------------
 @web_app.get("/")
 async def handle_root(user_agent: Optional[str] = Header(None)):
-    print(f"GET /     - received user_agent={user_agent}")
-    return "Hello World"
+    return {"message": "Hello World"}
 
 
 @web_app.post("/foo")
-async def handle_foo(item: Item, user_agent: Optional[str] = Header(None)):
-    print(f"POST /foo - received user_agent={user_agent}, item.name={item.name}")
+async def handle_foo(item: Item):
     return item
 
 @web_app.post("/generate_plan", response_model=List[PlanSection])
 async def generate_plan(
     resume: UploadFile = File(..., description="Candidate resume PDF"),
     job_description: str = Form(..., description="Job description"),
-    feedback: Optional[str] = Form(None, description="Optional feedback for revision"),
+    prompt: Optional[str] = Form(
+        "You are an expert technical interviewer. Review the resume and job description, "
+        "then produce a structured interview plan with tips and one coding question."
+    ),
 ):
-    # Validate content type
-    if resume.content_type != ("application/pdf"):
+    if resume.content_type != "application/pdf":
         raise HTTPException(status_code=400, detail="Resume must be a PDF file")
-    content = await resume.read()
-    if not content:
+
+    file_bytes = await resume.read()
+    if not file_bytes:
         raise HTTPException(status_code=400, detail="Empty file uploaded")
 
-    print(f"File: {resume.filename}, JD: {job_description[:50]}..., Feedback: {feedback}")
+    # Encode PDF to base64
+    resume_b64 = base64.b64encode(file_bytes).decode("utf-8")
 
-    # For now, don’t parse or forward the file.
-    # Simply respond with a mock plan that matches the frontend's expected format.
-    
-    # Base plan
-    plan = [
-        PlanSection(
-            id="plan-1",
-            title="Introduction & Resume Deep Dive",
-            description="We'll start with a brief intro and then dig into your resume, focusing on projects relevant to the job description."
-        ),
-        PlanSection(
-            id="plan-2",
-            title="Technical Challenge (Coding)",
-            description="A practical coding problem to assess your problem-solving process, coding style, and testing approach."
-        ),
-        PlanSection(
-            id="plan-3",
-            title="Candidate Q&A and Wrap-up",
-            description="Your turn to ask questions about the team, role, and Modal. We'll then discuss next steps."
-        ),
+    # -------------------------------
+    # Call OpenRouter API
+    # -------------------------------
+    OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+    if not OPENROUTER_API_KEY:
+        raise HTTPException(status_code=500, detail="Missing OpenRouter API key")
+
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "HTTP-Referer": "https://nova-hackathon-cmu.vercel.app", # <-- TODO: Change to your app's URL
+        "X-Title": "Nova Interview Planner", # <-- TODO: Change to your app's name
+    }
+
+    # 2. UPDATED system prompt to ask for a valid JSON object
+    system_prompt = (
+        "You are an expert AI interviewer. Your task is to generate a JSON response "
+        "containing a single 'plan' key. The value of 'plan' must be a list of 3-4 "
+        "interview sections. Each section in the list must be an object with an "
+        "'id' (string, e.g., 'intro'), 'title' (string), and 'description' (string). "
+        "Base your plan on the user's prompt, the provided job description, and the candidate's resume (PDF). "
+        "**Crucially, your entire response must be ONLY the JSON object, starting with `{` "
+        "and ending with `}`. Do not include any other text, preamble, conversational "
+        "phrasing, or markdown backticks.**"
+    )
+    # 3. UPDATED messages to use multimodal input
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": f"User Prompt: {prompt}\n\nJob Description:\n{job_description}"
+                },
+                {
+                    "type": "image_url",
+                    # This tells the model to treat the base64 string as a PDF
+                    "image_url": {
+                        "url": f"data:application/pdf;base64,{resume_b64}"
+                    }
+                }
+            ],
+        },
     ]
 
-    # If feedback was provided, modify the plan
-    if feedback:
-        plan.insert(0, PlanSection(
-            id="plan-0-feedback",
-            title="Revised: Feedback Incorporation",
-            description=f"Adjusting plan based on your request: '{feedback}'"
-        ))
+    payload = {
+        # 4. UPDATED model to one that explicitly handles PDF media type
+        "model": "anthropic/claude-3-haiku",
+        "messages": messages,
+        "response_format": {"type": "json_object"},
+        "max_tokens": 2048,
+    }
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        try:
+            response = await client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=payload
+            )
+            response.raise_for_status()  # Raise an exception for 4xx/5xx responses
+        
+        except httpx.RequestError as e:
+            raise HTTPException(status_code=500, detail=f"HTTP request error: {e}")
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=e.response.status_code, detail=f"OpenRouter error: {e.response.text}")
+
+    result = response.json()
+    content = result.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+
+    # 5. UPDATED parsing to be safe
+    try:
+        # Find the first '{' and the last '}' in the response
+        start_index = content.find('{')
+        end_index = content.rfind('}')
+        
+        if start_index == -1 or end_index == -1 or end_index < start_index:
+            raise ValueError("Could not find valid JSON object delimiters { and } in response.")
+        
+        # Extract the JSON substring
+        json_string = content[start_index : end_index + 1]
+
+        # The model returns a JSON *string* in the content field
+        data = json.loads(json_string)
+        
+        # Extract the list from the 'plan' key
+        sections_data = data.get("plan", [])
+        
+        if not isinstance(sections_data, list):
+            raise ValueError("Model did not return a list under the 'plan' key")
+
+        plan = [PlanSection(**s) for s in sections_data]
+        
+        if not plan:
+             raise ValueError("Model returned an empty plan")
+            
+    except json.JSONDecodeError:
+        print(f"Failed to decode JSON from model. Raw content (after extraction): {json_string}")
+        raise HTTPException(status_code=500, detail="Invalid JSON structure returned from model.")
+    except Exception as e:
+        print(f"Failed to parse model response. Error: {e}. Raw content: {content}")
+        raise HTTPException(status_code=500, detail=f"Invalid data returned from model: {e}")
 
     return plan
+    return plan
 
+
+# -------------------------------
+# Modal entrypoints
+# -------------------------------
 @app.function()
 @modal.asgi_app()
 def fastapi_app():
@@ -102,5 +195,7 @@ def fastapi_app():
     return web_app
 
 
-# if __name__ == "__main__":
-#     app.deploy("webapp")
+@app.function()
+@modal.fastapi_endpoint(method="POST")
+def f(item: Item):
+    return "Hello " + item.name
