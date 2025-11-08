@@ -253,6 +253,35 @@ export default function HomePage() {
     }
   }, [messages, phase]);
 
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const controller = new AbortController();
+    const target = `${window.location.origin}/editor-state`;
+
+    const syncEditorState = async () => {
+      try {
+        console.log("[editor-sync] sending update");
+        await fetch(target, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ document: editorValue }),
+          signal: controller.signal,
+        });
+      } catch (error) {
+        if ((error as Error).name !== "AbortError") {
+          console.error("[editor-sync] failed", error);
+        }
+      }
+    };
+
+    syncEditorState();
+
+    return () => controller.abort();
+  }, [editorValue]);
+
   const thinkingHeadline = useMemo(() => {
     if (!pendingAction) {
       return "Synthesizing the next step...";
