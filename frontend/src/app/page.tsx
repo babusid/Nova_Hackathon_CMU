@@ -1,7 +1,14 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  FormEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 const MonacoEditor = dynamic(() => import("@monaco-editor/react"), {
   ssr: false,
@@ -207,6 +214,81 @@ export default function HomePage() {
   const [interviewReport, setInterviewReport] =
     useState<InterviewReport | null>(null);
   const conversationEndRef = useRef<HTMLDivElement | null>(null);
+  const editorSnapshotRef = useRef<string>(DEFAULT_EDITOR_VALUE);
+  const syncControllerRef = useRef<AbortController | null>(null);
+  const syncTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const idleTicksRef = useRef(0);
+  const typingFlagRef = useRef(false);
+
+  useEffect(() => {
+    editorSnapshotRef.current = editorValue;
+  }, [editorValue]);
+
+  const stopSyncLoop = useCallback(() => {
+    if (syncTimerRef.current) {
+      clearInterval(syncTimerRef.current);
+      syncTimerRef.current = null;
+    }
+  }, []);
+
+  const syncEditorState = useCallback(async () => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const controller = new AbortController();
+    syncControllerRef.current?.abort();
+    syncControllerRef.current = controller;
+
+    try {
+      console.log("[editor-sync] sending update");
+      await fetch(`${window.location.origin}/editor-state`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ document: editorSnapshotRef.current }),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if ((error as Error).name !== "AbortError") {
+        console.error("[editor-sync] failed", error);
+      }
+    }
+  }, []);
+
+  const startSyncLoop = useCallback(() => {
+    if (syncTimerRef.current) {
+      return;
+    }
+
+    syncTimerRef.current = setInterval(() => {
+      syncEditorState();
+      if (typingFlagRef.current) {
+        typingFlagRef.current = false;
+        idleTicksRef.current = 0;
+      } else {
+        idleTicksRef.current += 1;
+        if (idleTicksRef.current >= 3) {
+          stopSyncLoop();
+        }
+      }
+    }, 1000);
+  }, [stopSyncLoop, syncEditorState]);
+
+  useEffect(() => {
+    return () => {
+      stopSyncLoop();
+      syncControllerRef.current?.abort();
+    };
+  }, [stopSyncLoop]);
+
+  const handleEditorChange = useCallback(
+    (value?: string, _event?: unknown) => {
+      setEditorValue(value ?? "");
+      typingFlagRef.current = true;
+      idleTicksRef.current = 0;
+      startSyncLoop();
+    },
+    [startSyncLoop],
+  );
 
   useEffect(() => {
     if (phase !== "thinking" || !pendingAction) {
@@ -252,35 +334,6 @@ export default function HomePage() {
       conversationEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }
   }, [messages, phase]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    const controller = new AbortController();
-    const target = `${window.location.origin}/editor-state`;
-
-    const syncEditorState = async () => {
-      try {
-        console.log("[editor-sync] sending update");
-        await fetch(target, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ document: editorValue }),
-          signal: controller.signal,
-        });
-      } catch (error) {
-        if ((error as Error).name !== "AbortError") {
-          console.error("[editor-sync] failed", error);
-        }
-      }
-    };
-
-    syncEditorState();
-
-    return () => controller.abort();
-  }, [editorValue]);
 
   const thinkingHeadline = useMemo(() => {
     if (!pendingAction) {
@@ -863,7 +916,7 @@ export default function HomePage() {
                 defaultLanguage="python"
                 theme="vs-dark"
                 value={editorValue}
-                onChange={(value) => setEditorValue(value ?? "")}
+                onChange={handleEditorChange}
                 options={{
                   minimap: { enabled: false },
                   fontSize: 14,
