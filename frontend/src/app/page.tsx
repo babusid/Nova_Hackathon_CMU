@@ -46,7 +46,7 @@ type InterviewReport = {
   nextSteps: string;
 };
 
-const PLANNER_URL = "https://om-anavekar--example-fastapi-app-fastapi-app-dev.modal.run/generate_plan";
+const PLANNER_URL = "/generate_plan";
 
 const DEFAULT_EDITOR_VALUE =
   "# Start coding here. Narrate your thought process as you go.\n";
@@ -210,7 +210,7 @@ export default function HomePage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [feedbackDraft, setFeedbackDraft] = useState<string>("");
   const [editorValue, setEditorValue] =
-    useState<string>(DEFAULT_EDITOR_VALUE);
+    useState<string>(DEFAULT_EDITOR_VALUE); // Use the default value
   const [transcript, setTranscript] = useState<InterviewUtterance[]>([]);
   const [interviewReport, setInterviewReport] =
     useState<InterviewReport | null>(null);
@@ -376,6 +376,7 @@ export default function HomePage() {
           "Amazing. I’ll launch the live interview workspace—feel free to narrate your thought process once you’re ready.",
       },
     ]);
+    setEditorValue(codingQuestion);
 
     setTranscript([
       {
@@ -547,8 +548,7 @@ export default function HomePage() {
 
             <div className="flex flex-wrap items-center justify-between gap-4">
               <div className="text-xs text-slate-400">
-                Powered by Modal-inspired tooling. Voice I/O is simulated for
-                now.
+                Powered by Modal and OpenRouter.
               </div>
               <button
                 type="submit"
@@ -786,7 +786,7 @@ export default function HomePage() {
             </h2>
             <div className="flex items-center gap-3 text-xs text-slate-400">
               <span className="inline-flex h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-              Voice link simulated — reference Modal Quillman for real hookups
+              Voice link enabled
             </div>
           </div>
         </header>
