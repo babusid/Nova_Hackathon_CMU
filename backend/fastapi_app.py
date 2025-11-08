@@ -1,49 +1,125 @@
-# ---
-# cmd: ["modal", "serve", "07_web_endpoints/fastapi_app.py"]
-# ---
+from __future__ import annotations
 
-# # Deploy FastAPI app with Modal
-
-# This example shows how you can deploy a [FastAPI](https://fastapi.tiangolo.com/) app with Modal.
-# You can serve any app written in an ASGI-compatible web framework (like FastAPI) using this pattern or you can server WSGI-compatible frameworks like Flask with [`wsgi_app`](https://modal.com/docs/guide/webhooks#wsgi).
-
+import asyncio
+from dataclasses import dataclass, field
 from typing import Optional
 
 import modal
-from fastapi import FastAPI, Header
-from pydantic import BaseModel
+from fastapi import FastAPI, Header, WebSocket, WebSocketDisconnect
 
 image = modal.Image.debian_slim().pip_install("fastapi[standard]", "pydantic")
 app = modal.App("example-fastapi-app", image=image)
 web_app = FastAPI()
 
 
-class Item(BaseModel):
-    name: str
+class EditorStateStore:
+    """Keeps the latest editor snapshot in-memory."""
+
+    def __init__(self) -> None:
+        self._state: str = ""
+        self._lock = asyncio.Lock()
+
+    async def update(self, state: str) -> None:
+        async with self._lock:
+            self._state = state
+
+    async def snapshot(self) -> str:
+        async with self._lock:
+            return self._state
+
+
+editor_state_store = EditorStateStore()
+
+
+
+class VoiceWebSocketSession:
+
+    def __init__(self, websocket: WebSocket) -> None:
+        self.websocket: WebSocket = websocket
+        self.inbound: asyncio.Queue = asyncio.Queue()
+        self.outbound: asyncio.Queue = asyncio.Queue()
+        self._shutdown: asyncio.Event = asyncio.Event()
+
+    async def run(self) -> None:
+        await self.websocket.accept()
+        await self.websocket.send_json({"type": "connection_ack"})
+
+        recv_task = asyncio.create_task(self.recv_loop())
+        send_task = asyncio.create_task(self.send_loop())
+        inference_task = asyncio.create_task(self.inference_loop())
+        tasks = [recv_task, send_task, inference_task]
+
+        try:
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+        finally:
+            self._shutdown.set()
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def recv_loop(self) -> None:
+        try:
+            while True:
+                message = await self.websocket.receive()
+                await self.inbound.put(message)
+        except WebSocketDisconnect:
+            pass
+        finally:
+            self._shutdown.set()
+
+    async def send_loop(self) -> None:
+        try:
+            while not self._shutdown.is_set():
+                try:
+                    payload = await asyncio.wait_for(self.outbound.get(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    continue
+                await self._send_payload(payload)
+        except WebSocketDisconnect:
+            pass
+        finally:
+            self._shutdown.set()
+
+    async def inference_loop(self) -> None:
+        # TODO: implement the speech->text->text->speech pipeline here
+        # leverage the global editor_state_store snapshot method to access the
+        # current editor code state
+        await self._shutdown.wait()
+
+    async def _send_payload(self, payload) -> None:
+        if isinstance(payload, bytes):
+            await self.websocket.send_bytes(payload)
+        elif isinstance(payload, str):
+            await self.websocket.send_text(payload)
+        else:
+            await self.websocket.send_json(payload)
 
 
 @web_app.get("/")
 async def handle_root(user_agent: Optional[str] = Header(None)):
     print(f"GET /     - received user_agent={user_agent}")
-    return "Hello World"
+    return {"status": "ok"}
 
 
-@web_app.post("/foo")
-async def handle_foo(item: Item, user_agent: Optional[str] = Header(None)):
-    print(f"POST /foo - received user_agent={user_agent}, item.name={item.name}")
-    return item
+@web_app.websocket("/voice_ws")
+async def voice_ws(websocket: WebSocket):
+    """Bi-directional audio/data channel for speech <-> text processing."""
+    session = VoiceWebSocketSession(websocket=websocket)
+    await session.run()
+
+
+@web_app.post("/editor-state")
+async def update_editor_state(payload: str):
+    """Overwrites the backend's view of the coderpad/editor contents."""
+    await editor_state_store.update(payload)
+    return {"status": "updated"}
 
 
 @app.function()
 @modal.asgi_app()
 def fastapi_app():
     return web_app
-
-
-@app.function()
-@modal.fastapi_endpoint(method="POST")
-def f(item: Item):
-    return "Hello " + item.name
 
 
 if __name__ == "__main__":
