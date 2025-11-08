@@ -5,6 +5,7 @@
 from typing import List, Optional
 import base64
 import os
+from fastapi.staticfiles import StaticFiles
 import httpx
 import json  # <-- 1. ADDED for safe JSON parsing
 import modal
@@ -12,19 +13,17 @@ from fastapi import FastAPI, Header, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from pathlib import Path
+
 
 # -------------------------------
 # Modal setup
 # -------------------------------
-image = (
-    modal.Image.debian_slim()
-    .pip_install("fastapi[standard]", "pydantic", "python-multipart", "httpx")
-)
-app = modal.App(
-    "example-fastapi-app",
-    image=image,
-    secrets=[modal.Secret.from_name("openrouter-secret")]
-)
+image = modal.Image.debian_slim().pip_install("fastapi[standard]")
+static_path = Path(__file__).with_name("static_frontend").resolve()
+image = image.add_local_dir(static_path, "/assets")
+
+app = modal.App("Syntherview", image=image, secrets=[modal.Secret.from_name("openrouter-secret")])
 web_app = FastAPI()
 
 web_app.add_middleware(
@@ -46,20 +45,13 @@ class PlanSection(BaseModel):
     title: str
     description: str
 
-
+class InterviewContext(BaseModel):
+    plan: List[PlanSection]
+    coding_question: str
+    
 # -------------------------------
-# Routes
-# -------------------------------
-@web_app.get("/")
-async def handle_root(user_agent: Optional[str] = Header(None)):
-    return {"message": "Hello World"}
-
-
-@web_app.post("/foo")
-async def handle_foo(item: Item):
-    return item
-
-@web_app.post("/generate_plan", response_model=List[PlanSection])
+# Routes# -------------------------------
+@web_app.post("/generate_plan", response_model=InterviewContext)
 async def generate_plan(
     resume: UploadFile = File(..., description="Candidate resume PDF"),
     job_description: str = Form(..., description="Job description"),
@@ -93,11 +85,19 @@ async def generate_plan(
 
     # 2. UPDATED system prompt to ask for a valid JSON object
     system_prompt = (
-        "You are an expert AI interviewer. Your task is to generate a JSON response "
-        "containing a single 'plan' key. The value of 'plan' must be a list of 3-4 "
-        "interview sections. Each section in the list must be an object with an "
-        "'id' (string, e.g., 'intro'), 'title' (string), and 'description' (string). "
-        "Base your plan on the user's prompt, the provided job description, and the candidate's resume (PDF). "
+        "You are an expert AI interviewer. Your task is to generate a JSON response. "
+        "Your response must be a single JSON object with two top-level keys: 'plan' and 'coding_question'. "
+        
+        "1. The 'plan' key: Its value must be a list of 3-4 interview sections. Each section in the list "
+        "must be an object with an 'id' (string, e.g., 'intro'), 'title' (string), and 'description' (string). "
+        
+        "2. The 'coding_question' key: Its value must be a string containing a simple, "
+        "role-relevant Python coding question. Format this question as Python comments, "
+        "including a function prototype. "
+        "Example: '# Write a function to reverse a string.\\ndef reverse_string(s):\\n  # Your code here\\n  pass\\n' "
+        
+        "Base your plan and question on the user's prompt, the job description, and the candidate's resume (PDF). "
+        
         "**Crucially, your entire response must be ONLY the JSON object, starting with `{` "
         "and ending with `}`. Do not include any other text, preamble, conversational "
         "phrasing, or markdown backticks.**"
@@ -147,24 +147,25 @@ async def generate_plan(
 
     result = response.json()
     content = result.get("choices", [{}])[0].get("message", {}).get("content", "{}")
-
+    
     # 5. UPDATED parsing to be safe
     try:
-        # Find the first '{' and the last '}' in the response
+        # ... (finding json_string is the same) ...
         start_index = content.find('{')
         end_index = content.rfind('}')
         
         if start_index == -1 or end_index == -1 or end_index < start_index:
             raise ValueError("Could not find valid JSON object delimiters { and } in response.")
         
-        # Extract the JSON substring
         json_string = content[start_index : end_index + 1]
-
-        # The model returns a JSON *string* in the content field
         data = json.loads(json_string)
         
         # Extract the list from the 'plan' key
         sections_data = data.get("plan", [])
+        
+        # --- 3. EXTRACT THE CODING QUESTION ---
+        coding_question_str = data.get("coding_question", "# No coding question was generated.")
+        # --- END ADD ---
         
         if not isinstance(sections_data, list):
             raise ValueError("Model did not return a list under the 'plan' key")
@@ -173,7 +174,7 @@ async def generate_plan(
         
         if not plan:
              raise ValueError("Model returned an empty plan")
-            
+        
     except json.JSONDecodeError:
         print(f"Failed to decode JSON from model. Raw content (after extraction): {json_string}")
         raise HTTPException(status_code=500, detail="Invalid JSON structure returned from model.")
@@ -181,9 +182,8 @@ async def generate_plan(
         print(f"Failed to parse model response. Error: {e}. Raw content: {content}")
         raise HTTPException(status_code=500, detail=f"Invalid data returned from model: {e}")
 
-    return plan
-    return plan
-
+    # --- 4. RETURN THE NEW OBJECT ---
+    return InterviewContext(plan=plan, coding_question=coding_question_str)
 
 # -------------------------------
 # Modal entrypoints
