@@ -263,7 +263,7 @@ export default function HomePage() {
 
   const thinkingSubhead = useMemo(() => {
     if (!pendingAction?.feedback) {
-      return "Pulling in role expectations, competencies, and Modal-flavored prompts.";
+      return "Pulling in role expectations, competencies, and your current skills.";
     }
     const clipped =
       pendingAction.feedback.length > 160
@@ -465,14 +465,14 @@ export default function HomePage() {
         <div className="w-full max-w-3xl rounded-3xl border border-white/10 bg-slate-900/60 p-10 shadow-2xl backdrop-blur">
           <header className="space-y-3">
             <p className="text-sm font-medium uppercase tracking-[0.2em] text-emerald-400/80">
-              Modal AI mock interview lab
+              Syntherview
             </p>
             <h1 className="text-4xl font-semibold tracking-tight">
               Prep with a voice-first AI interviewer
             </h1>
             <p className="text-sm text-slate-300">
               Upload your resume, add any job context, and let the system plan a
-              tailored session inspired by Modal’s voice agent stack.
+              tailored interview session.
             </p>
           </header>
 
@@ -517,7 +517,7 @@ export default function HomePage() {
                 </p>
               ) : (
                 <p className="text-xs text-slate-400">
-                  Upload your resume to unlock the interview planner.
+                  Upload your resume to enable the interview planner.
                 </p>
               )}
               {resumeError && (
@@ -574,7 +574,7 @@ export default function HomePage() {
           </h2>
           <p className="mt-4 text-sm text-slate-300">{thinkingSubhead}</p>
           <p className="mt-8 text-xs uppercase tracking-[0.35em] text-slate-500">
-            Connecting to Modal backend...
+            Parsing your resume...
           </p>
         </div>
       </div>
@@ -587,7 +587,7 @@ export default function HomePage() {
         <div className="mx-auto flex max-w-6xl flex-col gap-8">
           <header className="flex flex-col gap-4 rounded-3xl border border-white/10 bg-slate-900/60 p-8 backdrop-blur">
             <p className="text-xs font-semibold uppercase tracking-[0.2em] text-emerald-400/80">
-              Interview plan draft {planIteration + 1}
+              Interview plan {planIteration + 1}
             </p>
             <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
               <h2 className="text-3xl font-semibold tracking-tight">
@@ -624,7 +624,7 @@ export default function HomePage() {
               <div className="flex items-center justify-between">
                 <h3 className="text-lg font-semibold">Planned flow</h3>
                 <span className="text-xs text-slate-400">
-                  Inspired by Modal’s Quillman voice orchestration
+                  Built from past interviews at major companies
                 </span>
               </div>
               <div className="flex flex-col gap-4">
@@ -782,7 +782,7 @@ export default function HomePage() {
           </p>
           <div className="mt-3 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
             <h2 className="text-3xl font-semibold tracking-tight">
-              Coding canvas + voice interviewer
+              Coding Canvas
             </h2>
             <div className="flex items-center gap-3 text-xs text-slate-400">
               <span className="inline-flex h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
@@ -794,7 +794,7 @@ export default function HomePage() {
         <div className="grid gap-6 lg:grid-cols-[minmax(0,1.9fr)_minmax(0,1fr)]">
           <section className="flex flex-col gap-4 rounded-3xl border border-white/10 bg-slate-900/60 p-6 backdrop-blur">
             <div className="flex items-center justify-between">
-              <h3 className="text-lg font-semibold">Coding workspace</h3>
+              <h3 className="text-lg font-semibold">Workspace</h3>
               <span className="text-xs text-slate-400">
                 Language: Python (Monaco editor)
               </span>
