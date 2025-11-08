@@ -41,11 +41,12 @@ type InterviewReport = {
   nextSteps: string;
 };
 
+const PLANNER_URL = "https://om-anavekar--example-fastapi-app-fastapi-app-dev.modal.run/generate_plan";
+
 const DEFAULT_EDITOR_VALUE =
   "# Start coding here. Narrate your thought process as you go.\n";
 
 // #TODO - CODEX SUGGESTION: Remove this artificial delay once the planner response arrives directly from the backend.
-const THINKING_DURATION_MS = 5000;
 
 const createId = (prefix: string) =>
   `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
@@ -164,9 +165,9 @@ function synthesizeReport(opts: {
     `Moved through ${plan.length} planned segments with ${interviewerTurns} interviewer prompts and ${candidateTurns} responses.`,
     codeLines.length
       ? `Authored ~${codeLines.length} lines in the workspace; opening focus: ${codeLines
-          .slice(0, 2)
-          .join(" ")
-          .slice(0, 120)}${codeLines.length > 2 ? "…" : "."}`
+        .slice(0, 2)
+        .join(" ")
+        .slice(0, 120)}${codeLines.length > 2 ? "…" : "."}`
       : "Relied primarily on verbal reasoning—no substantive code committed during this run.",
     `Kept alignment with the closing loop by acknowledging next steps before ending early.`,
   ];
@@ -194,6 +195,7 @@ export default function HomePage() {
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(
     null,
   );
+  const [resumeFile, setResumeFile] = useState<File | null>(null);
   const [resumeFileName, setResumeFileName] = useState<string>("");
   const [resumeError, setResumeError] = useState<string | null>(null);
   const [supplementalInfo, setSupplementalInfo] = useState<string>("");
@@ -208,44 +210,6 @@ export default function HomePage() {
     useState<InterviewReport | null>(null);
   const conversationEndRef = useRef<HTMLDivElement | null>(null);
 
-  useEffect(() => {
-    if (phase !== "thinking" || !pendingAction) {
-      return;
-    }
-
-    // #TODO - CODEX SUGGESTION: Await the backend planner result instead of relying on a timeout-based simulation.
-    const timer = setTimeout(() => {
-      if (pendingAction.type === "plan") {
-        const plan = synthesizePlan({
-          iteration: pendingAction.iteration,
-          resumeName: resumeFileName,
-          supplementalInfo,
-          feedback: pendingAction.feedback,
-        });
-
-        setPlanSections(plan);
-        setPlanIteration(pendingAction.iteration);
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: createId("assistant"),
-            role: "assistant",
-            content: planMessage(
-              plan,
-              pendingAction.iteration,
-              pendingAction.feedback,
-              supplementalInfo.trim().length > 0,
-              resumeFileName,
-            ),
-          },
-        ]);
-        setPhase("planning");
-        setPendingAction(null);
-      }
-    }, THINKING_DURATION_MS);
-
-    return () => clearTimeout(timer);
-  }, [pendingAction, phase, resumeFileName, supplementalInfo]);
 
   useEffect(() => {
     if (phase === "planning") {
@@ -302,9 +266,10 @@ export default function HomePage() {
     return `Integrating your note: “${clipped}”`;
   }, [pendingAction]);
 
-  const handleWelcomeSubmit = (event: FormEvent<HTMLFormElement>) => {
+  // --- REPLACE THIS FUNCTION ---
+  const handleWelcomeSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!resumeFileName) {
+    if (!resumeFile) { // Check for the File object
       setResumeError("Please upload your resume to continue.");
       return;
     }
@@ -333,8 +298,62 @@ export default function HomePage() {
     };
 
     setMessages([userMessage, assistantAck]);
-    setPendingAction({ type: "plan", iteration: 0 });
+    const action: PendingAction = { type: "plan", iteration: 0 };
+    setPendingAction(action);
     setPhase("thinking");
+
+    // --- Start Backend Integration ---
+    const formData = new FormData();
+    formData.append("resume", resumeFile);
+    formData.append("job_description", supplementalInfo.trim() || "No job description provided.");
+    formData.append("feedback", ""); // No feedback on first run
+
+    try {
+      const response = await fetch(PLANNER_URL, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || "Failed to generate plan");
+      }
+
+      const plan: PlanSection[] = await response.json();
+
+      // Success: Update state with real plan from backend
+      setPlanSections(plan);
+      setPlanIteration(action.iteration);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: createId("assistant"),
+          role: "assistant",
+          content: planMessage(
+            plan,
+            action.iteration,
+            undefined,
+            supplementalInfo.trim().length > 0,
+            resumeFileName,
+          ),
+        },
+      ]);
+      setPhase("planning");
+      setPendingAction(null);
+    } catch (error) {
+      console.error("Failed to fetch plan:", error);
+      const errorMessage =
+        error instanceof Error ? error.message : "An unknown error occurred.";
+      // Show error on the welcome screen
+      setResumeError(
+        `Error from backend: ${errorMessage}. Please try again.`,
+      );
+      // Revert to welcome screen
+      setPhase("welcome");
+      setMessages([]);
+      setPendingAction(null);
+    }
+    // --- End Backend Integration ---
   };
 
   const handleFeedbackSubmit = (event: FormEvent<HTMLFormElement>) => {
@@ -445,6 +464,7 @@ export default function HomePage() {
   const resetExperience = () => {
     setPhase("welcome");
     setPendingAction(null);
+    setResumeFile(null);
     setResumeFileName("");
     setResumeError(null);
     setSupplementalInfo("");
@@ -492,14 +512,16 @@ export default function HomePage() {
                   </span>
                 </span>
                 <span className="text-xs text-slate-400">
-                  PDF, DOCX, or TXT — max 10MB
+                  PDF only — max 10MB
                 </span>
                 <input
                   type="file"
-                  accept=".pdf,.doc,.docx,.txt"
+                  accept=".pdf"
                   className="hidden"
                   onChange={(event) => {
                     const file = event.target.files?.[0];
+                    console.log("File selected:", file);
+                    setResumeFile(file ? file : null);
                     setResumeFileName(file ? file.name : "");
                     setResumeError(
                       file ? null : "Please upload your resume to continue.",
@@ -549,7 +571,7 @@ export default function HomePage() {
               </div>
               <button
                 type="submit"
-                disabled={!resumeFileName}
+                disabled={!resumeFile}
                 className="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-emerald-500 via-emerald-400 to-cyan-400 px-6 py-3 text-sm font-semibold text-slate-950 shadow-lg transition hover:shadow-emerald-500/40 focus:outline-none focus:ring-2 focus:ring-emerald-300/70 focus:ring-offset-2 focus:ring-offset-slate-950 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 Generate interview plan
@@ -571,7 +593,7 @@ export default function HomePage() {
           </h2>
           <p className="mt-4 text-sm text-slate-300">{thinkingSubhead}</p>
           <p className="mt-8 text-xs uppercase tracking-[0.35em] text-slate-500">
-            Simulating {THINKING_DURATION_MS / 1000}-second Modal planning loop
+            Connecting to Modal backend...
           </p>
         </div>
       </div>
@@ -661,18 +683,16 @@ export default function HomePage() {
                     {messages.map((message) => (
                       <div
                         key={message.id}
-                        className={`flex ${
-                          message.role === "user"
-                            ? "justify-end"
-                            : "justify-start"
-                        }`}
+                        className={`flex ${message.role === "user"
+                          ? "justify-end"
+                          : "justify-start"
+                          }`}
                       >
                         <div
-                          className={`max-w-[90%] rounded-2xl border px-4 py-3 text-sm leading-relaxed ${
-                            message.role === "user"
-                              ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-100"
-                              : "border-white/10 bg-slate-800/70 text-slate-100"
-                          }`}
+                          className={`max-w-[90%] rounded-2xl border px-4 py-3 text-sm leading-relaxed ${message.role === "user"
+                            ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-100"
+                            : "border-white/10 bg-slate-800/70 text-slate-100"
+                            }`}
                         >
                           <p className="text-[10px] font-semibold uppercase tracking-[0.25em] text-slate-400">
                             {message.role === "user" ? "You" : "Planner"}
@@ -908,11 +928,10 @@ export default function HomePage() {
                 {transcript.map((entry) => (
                   <div
                     key={entry.id}
-                    className={`rounded-2xl border px-4 py-3 text-sm ${
-                      entry.speaker === "interviewer"
-                        ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-100"
-                        : "border-white/10 bg-slate-800/70 text-slate-100"
-                    }`}
+                    className={`rounded-2xl border px-4 py-3 text-sm ${entry.speaker === "interviewer"
+                      ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-100"
+                      : "border-white/10 bg-slate-800/70 text-slate-100"
+                      }`}
                   >
                     <div className="flex items-center justify-between text-[11px] uppercase tracking-[0.3em] text-slate-400">
                       <span>
