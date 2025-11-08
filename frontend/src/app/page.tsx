@@ -63,6 +63,60 @@ const timestamp = () =>
     minute: "2-digit",
   });
 
+const TARGET_SAMPLE_RATE = 16000;
+
+type VoiceStatus = "idle" | "connecting" | "connected" | "error";
+
+const downsampleBuffer = (
+  buffer: Float32Array,
+  inputSampleRate: number,
+  targetRate: number,
+) => {
+  if (targetRate >= inputSampleRate) {
+    return buffer;
+  }
+
+  const sampleRateRatio = inputSampleRate / targetRate;
+  const newLength = Math.round(buffer.length / sampleRateRatio);
+  const result = new Float32Array(newLength);
+  let offsetResult = 0;
+  let offsetBuffer = 0;
+
+  while (offsetResult < result.length) {
+    const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
+    let accum = 0;
+    let count = 0;
+    for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+      accum += buffer[i];
+      count += 1;
+    }
+    result[offsetResult] = accum / count;
+    offsetResult += 1;
+    offsetBuffer = nextOffsetBuffer;
+  }
+
+  return result;
+};
+
+const float32ToPCM16 = (buffer: Float32Array) => {
+  const output = new DataView(new ArrayBuffer(buffer.length * 2));
+  for (let i = 0; i < buffer.length; i++) {
+    let sample = buffer[i];
+    sample = Math.max(-1, Math.min(1, sample));
+    output.setInt16(i * 2, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+  }
+  return output.buffer;
+};
+
+const playBase64Audio = async (base64Audio: string) => {
+  try {
+    const audio = new Audio(`data:audio/wav;base64,${base64Audio}`);
+    await audio.play();
+  } catch (error) {
+    console.error("Failed to play audio", error);
+  }
+};
+
 // #TODO - CODEX SUGGESTION: Replace this synthetic plan generator with data returned from the orchestration backend.
 function synthesizePlan(opts: {
   iteration: number;
@@ -213,12 +267,18 @@ export default function HomePage() {
   const [transcript, setTranscript] = useState<InterviewUtterance[]>([]);
   const [interviewReport, setInterviewReport] =
     useState<InterviewReport | null>(null);
+  const [voiceStatus, setVoiceStatus] = useState<VoiceStatus>("idle");
   const conversationEndRef = useRef<HTMLDivElement | null>(null);
   const editorSnapshotRef = useRef<string>(DEFAULT_EDITOR_VALUE);
   const syncControllerRef = useRef<AbortController | null>(null);
   const syncTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const idleTicksRef = useRef(0);
   const typingFlagRef = useRef(false);
+  const wsRef = useRef<WebSocket | null>(null);
+  const wsReadyRef = useRef(false);
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
 
   useEffect(() => {
     editorSnapshotRef.current = editorValue;
@@ -289,6 +349,241 @@ export default function HomePage() {
     },
     [startSyncLoop],
   );
+
+  const handleVoiceMessage = useCallback(
+    async (data: MessageEvent["data"]) => {
+      try {
+        let textPayload: string | null = null;
+        if (typeof data === "string") {
+          textPayload = data;
+        } else if (data instanceof Blob) {
+          textPayload = await data.text();
+        } else if (data instanceof ArrayBuffer) {
+          textPayload = new TextDecoder().decode(data);
+        }
+
+        if (!textPayload) {
+          return;
+        }
+
+        const payload = JSON.parse(textPayload);
+        if (payload.type === "connection_ack") {
+          setVoiceStatus("connected");
+          return;
+        }
+
+        if (payload.type === "interviewer_reply") {
+          if (payload.text) {
+            setTranscript((prev) => [
+              ...prev,
+              {
+                id: createId("interviewer"),
+                speaker: "interviewer",
+                content: payload.text,
+                timestamp: timestamp(),
+              },
+            ]);
+          }
+
+          if (payload.audio_base64) {
+            void playBase64Audio(payload.audio_base64);
+          }
+        }
+      } catch (error) {
+        console.error("voice_ws payload parse failed", error);
+      }
+    },
+    [setTranscript, setVoiceStatus],
+  );
+
+  const teardownVoice = useCallback(() => {
+    wsReadyRef.current = false;
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+
+    if (processorRef.current) {
+      processorRef.current.disconnect();
+      processorRef.current = null;
+    }
+
+    if (audioContextRef.current) {
+      audioContextRef.current.close().catch(() => undefined);
+      audioContextRef.current = null;
+    }
+
+    if (micStreamRef.current) {
+      micStreamRef.current.getTracks().forEach((track) => track.stop());
+      micStreamRef.current = null;
+    }
+
+    setVoiceStatus("idle");
+  }, []);
+
+  const connectVoiceWebSocket = useCallback(() => {
+    if (typeof window === "undefined") {
+      return Promise.reject(new Error("Window is not available"));
+    }
+
+    if (wsRef.current && wsReadyRef.current) {
+      return Promise.resolve();
+    }
+
+    setVoiceStatus("connecting");
+
+    return new Promise<void>((resolve, reject) => {
+      try {
+        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        const wsUrl = `${protocol}//${window.location.host}/voice_ws`;
+        const ws = new WebSocket(wsUrl);
+        ws.binaryType = "arraybuffer";
+        ws.onopen = () => {
+          wsReadyRef.current = true;
+          setVoiceStatus("connected");
+          resolve();
+        };
+        ws.onerror = (event) => {
+          wsReadyRef.current = false;
+          console.error("voice_ws error", event);
+          setVoiceStatus("error");
+          reject(new Error("Voice websocket error"));
+        };
+        ws.onclose = () => {
+          wsReadyRef.current = false;
+          wsRef.current = null;
+          setVoiceStatus("idle");
+        };
+        ws.onmessage = (event) => {
+          void handleVoiceMessage(event.data);
+        };
+        wsRef.current = ws;
+      } catch (error) {
+        setVoiceStatus("error");
+        reject(error);
+      }
+    });
+  }, [handleVoiceMessage]);
+
+  const startMicrophoneCapture = useCallback(async () => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    if (micStreamRef.current) {
+      return;
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error("Microphone access is not available");
+    }
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1 },
+    });
+
+    const AudioContextClass =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext?: typeof AudioContext })
+        .webkitAudioContext;
+
+    if (!AudioContextClass) {
+      throw new Error("AudioContext is not supported");
+    }
+
+    const audioContext = new AudioContextClass();
+    await audioContext.resume();
+
+    const source = audioContext.createMediaStreamSource(stream);
+    const processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+    processor.onaudioprocess = (event) => {
+      if (!wsReadyRef.current || !wsRef.current) {
+        return;
+      }
+      const input = event.inputBuffer.getChannelData(0);
+      const bufferCopy = new Float32Array(input.length);
+      bufferCopy.set(input);
+      const downsampled = downsampleBuffer(
+        bufferCopy,
+        audioContext.sampleRate,
+        TARGET_SAMPLE_RATE,
+      );
+      if (!downsampled.length) {
+        return;
+      }
+      const pcmChunk = float32ToPCM16(downsampled);
+      try {
+        wsRef.current.send(pcmChunk);
+      } catch (error) {
+        console.error("Failed to stream audio chunk", error);
+      }
+    };
+
+    source.connect(processor);
+    processor.connect(audioContext.destination);
+
+    micStreamRef.current = stream;
+    audioContextRef.current = audioContext;
+    processorRef.current = processor;
+  }, []);
+
+  useEffect(() => {
+    if (phase !== "interview") {
+      teardownVoice();
+      return;
+    }
+
+    let cancelled = false;
+
+    const setup = async () => {
+      try {
+        await connectVoiceWebSocket();
+        await startMicrophoneCapture();
+        if (!cancelled) {
+          setVoiceStatus("connected");
+        }
+      } catch (error) {
+        console.error("Failed to start voice session", error);
+        if (!cancelled) {
+          setVoiceStatus("error");
+        }
+      }
+    };
+
+    setup();
+
+    return () => {
+      cancelled = true;
+      teardownVoice();
+    };
+  }, [connectVoiceWebSocket, phase, startMicrophoneCapture, teardownVoice]);
+
+  const voiceStatusLabel = useMemo(() => {
+    switch (voiceStatus) {
+      case "connecting":
+        return "Voice link: connecting…";
+      case "connected":
+        return "Voice link: live";
+      case "error":
+        return "Voice link: error";
+      default:
+        return "Voice link: idle";
+    }
+  }, [voiceStatus]);
+
+  const voiceIndicatorClass = useMemo(() => {
+    switch (voiceStatus) {
+      case "connected":
+        return "bg-emerald-400";
+      case "connecting":
+        return "bg-amber-400 animate-pulse";
+      case "error":
+        return "bg-rose-400";
+      default:
+        return "bg-slate-500";
+    }
+  }, [voiceStatus]);
 
   useEffect(() => {
     if (phase !== "thinking" || !pendingAction) {
@@ -896,8 +1191,10 @@ export default function HomePage() {
               Coding canvas + voice interviewer
             </h2>
             <div className="flex items-center gap-3 text-xs text-slate-400">
-              <span className="inline-flex h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-              Voice link simulated — reference Modal Quillman for real hookups
+              <span
+                className={`inline-flex h-2 w-2 rounded-full ${voiceIndicatorClass}`}
+              />
+              {voiceStatusLabel}
             </div>
           </div>
         </header>
