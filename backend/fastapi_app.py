@@ -8,11 +8,11 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
 image = modal.Image.debian_slim().pip_install("fastapi[standard]")
+static_path = Path(__file__).with_name("static_frontend").resolve()
+image = image.add_local_dir(static_path, "/assets")
+
 app = modal.App("example-fastapi-app", image=image)
 web_app = FastAPI()
-STATIC_FRONTEND_DIR = Path(__file__).resolve().parent / "static_frontend"
-STATIC_FRONTEND_DIR.mkdir(parents=True, exist_ok=True)
-
 
 class EditorStateStore:
     """Keeps the latest editor snapshot in-memory."""
@@ -31,7 +31,6 @@ class EditorStateStore:
 
 
 editor_state_store = EditorStateStore()
-
 
 
 class VoiceWebSocketSession:
@@ -114,15 +113,11 @@ async def update_editor_state(payload: dict):
     await editor_state_store.update(document)
     return {"status": "updated"}
 
-web_app.mount(
-    "/",
-    StaticFiles(directory=str(STATIC_FRONTEND_DIR), html=True),
-    name="frontend",
-)
 
 @app.function()
 @modal.asgi_app()
 def fastapi_app():
+    web_app.mount("/", StaticFiles(directory="/assets", html=True))
     return web_app
 
 

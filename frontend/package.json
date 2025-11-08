@@ -5,6 +5,9 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:static": "next build",
+    "sync:backend": "node scripts/sync-static.mjs",
+    "deploy:static": "npm run build:static && npm run sync:backend",
     "start": "next start",
     "lint": "eslint"
   },

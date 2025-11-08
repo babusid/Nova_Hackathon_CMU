@@ -1,24 +1,31 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
-## Getting Started
-
-First, run the development server:
+## Local Development
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000) to work on the UI. Changes in `src/app` hot‑reload automatically.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Static Export → FastAPI
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+The backend serves a fully static export from `backend/static_frontend`. Build and sync via:
+
+```bash
+# from frontend/
+npm run deploy:static
+```
+
+This runs `next build` (with `output: "export"`) and copies the generated `frontend/out` directory into `backend/static_frontend`. If you prefer manual steps:
+
+```bash
+npm run build:static   # produces frontend/out
+npm run sync:backend   # mirrors frontend/out -> backend/static_frontend
+```
+
+After syncing, start the FastAPI app (e.g., `uvicorn backend.fastapi_app:web_app --reload`) and hit `http://localhost:8000/` to confirm the exported UI loads alongside the `/voice_ws` and `/editor-state` APIs.
 
 ## Learn More
 
