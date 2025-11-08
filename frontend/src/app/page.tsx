@@ -20,6 +20,11 @@ type InterviewContext = {
   coding_question: string;
 };
 
+type BackendFeedback = {
+  highlights: string[];
+  recommendations: string[];
+};
+
 type ChatMessage = {
   id: string;
   role: "user" | "assistant";
@@ -62,55 +67,6 @@ const timestamp = () =>
     minute: "2-digit",
   });
 
-// #TODO - CODEX SUGGESTION: Replace this synthetic plan generator with data returned from the orchestration backend.
-function synthesizePlan(opts: {
-  iteration: number;
-  resumeName?: string;
-  supplementalInfo?: string;
-  feedback?: string;
-}): PlanSection[] {
-  const { iteration, resumeName, supplementalInfo, feedback } = opts;
-  const resumeNote = resumeName ? ` anchored on ${resumeName}` : "";
-  const supplementalAvailable = Boolean(supplementalInfo?.trim());
-
-  const base: PlanSection[] = [
-    {
-      id: `intro-${iteration}`,
-      title: "Opening & Rapport",
-      description: `Quick check-in, align on the target role, and frame expectations${resumeNote}.`,
-    },
-    {
-      id: `technical-${iteration}`,
-      title: "Technical Challenge",
-      description:
-        "Live coding walkthrough with incremental checkpoints, emphasizing clarity of thought and trade-offs.",
-    },
-    {
-      id: `resume-${iteration}`,
-      title: "Resume Review & Storytelling",
-      description: supplementalAvailable
-        ? "Targeted follow-ups on key resume highlights with context-aware probes held behind the scenes."
-        : "Targeted follow-ups on key resume highlights—dig into impact, scope, and collaboration moments.",
-    },
-    {
-      id: `wrap-${iteration}`,
-      title: "Closing Feedback",
-      description:
-        "Actionable coaching, suggested resources, and plan for next steps after the session.",
-    },
-  ];
-
-  if (feedback) {
-    base.splice(2, 0, {
-      id: `feedback-${iteration}`,
-      title: "Feedback-Focused Probe",
-      description: `Incorporate feedback: “${feedback}”. Tailor targeted follow-ups and scenario prompts around this.`,
-    });
-  }
-
-  return base;
-}
-
 function planMessage(
   plan: PlanSection[],
   iteration: number,
@@ -141,8 +97,31 @@ function planMessage(
   return `${intro}\n\n${bullets}${extrasBlock}\n\nLet me know if you’d like to adjust anything else.`;
 }
 
-// #TODO - CODEX SUGGESTION: Swap this heuristic report with the backend-produced evaluation once integration lands.
-function synthesizeReport(opts: {
+// The new async function that calls the backend
+async function generateBackendReport(
+  plan: PlanSection[],
+  editorValue: string,
+): Promise<BackendFeedback> {
+  const payload: InterviewContext = {
+    plan: plan,
+    coding_question: editorValue, // Send the final code as the "question" for analysis
+  };
+
+  const response = await fetch("/generate_feedback", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json();
+    throw new Error(errorData.detail || "Failed to generate feedback");
+  }
+
+  return await response.json();
+}
+
+function synthesizeMockReport(opts: {
   plan: PlanSection[];
   transcript: InterviewUtterance[];
   editorValue: string;
@@ -187,7 +166,7 @@ function synthesizeReport(opts: {
   ];
 
   return {
-    overview: `Session wrapped manually after ${totalTurns} conversational turns—report generated on the fly.`,
+    overview: `Session wrapped manually after ${totalTurns} conversational turns.`,
     highlights,
     recommendations,
     nextSteps:
@@ -411,7 +390,7 @@ export default function HomePage() {
     ]);
   };
 
-  const handleEndInterview = () => {
+  const handleEndInterview = async () => {
     // #TODO - CODEX SUGGESTION: Persist the wrap-up through the backend and hydrate the report from its response.
     const closingExchange: InterviewUtterance[] = [
       {
@@ -432,13 +411,34 @@ export default function HomePage() {
 
     const updatedTranscript = [...transcript, ...closingExchange];
     setTranscript(updatedTranscript);
-    setInterviewReport(
-      synthesizeReport({
-        plan: planSections,
-        transcript: updatedTranscript,
+    try {
+      // 1. Try to get the real feedback from the backend
+      const feedback = await generateBackendReport(
+        planSections,
         editorValue,
-      }),
-    );
+      );
+
+      // 2. Success: Populate the report with real data
+      setInterviewReport({
+        overview: `Session complete. AI-generated feedback based on your code and our plan.`,
+        highlights: feedback.highlights,
+        recommendations: feedback.recommendations,
+        nextSteps:
+          "Review the feedback, then schedule another run or practice these concepts.",
+      });
+    } catch (error) {
+      console.error("Failed to generate backend report, using mock:", error);
+
+      // 3. Failure: Fall back to the original mock report
+      setInterviewReport(
+        synthesizeMockReport({
+          plan: planSections,
+          transcript: updatedTranscript,
+          editorValue,
+        }),
+      );
+    }
+
     setPhase("complete");
   };
 
@@ -670,7 +670,7 @@ export default function HomePage() {
               Mock interview report
             </p>
             <h2 className="mt-3 text-3xl font-semibold tracking-tight">
-              Early wrap summary & coaching cues
+              Interview Summary & Coaching Cues
             </h2>
             <p className="mt-4 text-sm text-slate-300">
               {interviewReport.overview}
