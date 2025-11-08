@@ -352,6 +352,7 @@ export default function HomePage() {
 
   const handleVoiceMessage = useCallback(
     async (data: MessageEvent["data"]) => {
+      console.log("[voice-ws] incoming message", data);
       try {
         let textPayload: string | null = null;
         if (typeof data === "string") {
@@ -363,10 +364,12 @@ export default function HomePage() {
         }
 
         if (!textPayload) {
+          console.warn("[voice-ws] unable to decode payload");
           return;
         }
 
         const payload = JSON.parse(textPayload);
+        console.log("[voice-ws] parsed payload", payload);
         if (payload.type === "connection_ack") {
           setVoiceStatus("connected");
           return;
@@ -400,6 +403,7 @@ export default function HomePage() {
     wsReadyRef.current = false;
     if (wsRef.current) {
       wsRef.current.close();
+      console.log("[voice-ws] closed websocket");
       wsRef.current = null;
     }
 
@@ -436,22 +440,31 @@ export default function HomePage() {
       try {
         const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
         const wsUrl = `${protocol}//${window.location.host}/voice_ws`;
+        console.log("[voice-ws] connecting to", wsUrl);
         const ws = new WebSocket(wsUrl);
         ws.binaryType = "arraybuffer";
         ws.onopen = () => {
           wsReadyRef.current = true;
+          console.log("[voice-ws] websocket open");
           setVoiceStatus("connected");
           resolve();
         };
         ws.onerror = (event) => {
           wsReadyRef.current = false;
-          console.error("voice_ws error", event);
+          console.error("[voice-ws] websocket error", event);
           setVoiceStatus("error");
           reject(new Error("Voice websocket error"));
         };
-        ws.onclose = () => {
+        ws.onclose = (event) => {
           wsReadyRef.current = false;
           wsRef.current = null;
+          console.log(
+            "[voice-ws] websocket closed",
+            event.code,
+            event.reason,
+            "wasClean",
+            event.wasClean,
+          );
           setVoiceStatus("idle");
         };
         ws.onmessage = (event) => {
@@ -481,6 +494,7 @@ export default function HomePage() {
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: { channelCount: 1 },
     });
+    console.log("[voice-ws] microphone stream active");
 
     const AudioContextClass =
       window.AudioContext ||
@@ -515,6 +529,10 @@ export default function HomePage() {
       const pcmChunk = float32ToPCM16(downsampled);
       try {
         wsRef.current.send(pcmChunk);
+        console.log(
+          "[voice-ws] sent chunk bytes",
+          (pcmChunk as ArrayBuffer).byteLength,
+        );
       } catch (error) {
         console.error("Failed to stream audio chunk", error);
       }
