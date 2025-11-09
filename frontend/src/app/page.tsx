@@ -15,6 +15,16 @@ type PlanSection = {
   description: string;
 };
 
+type InterviewContext = {
+  plan: PlanSection[];
+  coding_question: string;
+};
+
+type BackendFeedback = {
+  highlights: string[];
+  recommendations: string[];
+};
+
 type ChatMessage = {
   id: string;
   role: "user" | "assistant";
@@ -41,11 +51,12 @@ type InterviewReport = {
   nextSteps: string;
 };
 
+const PLANNER_URL = "/generate_plan";
+
 const DEFAULT_EDITOR_VALUE =
   "# Start coding here. Narrate your thought process as you go.\n";
 
 // #TODO - CODEX SUGGESTION: Remove this artificial delay once the planner response arrives directly from the backend.
-const THINKING_DURATION_MS = 5000;
 
 const createId = (prefix: string) =>
   `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
@@ -55,55 +66,6 @@ const timestamp = () =>
     hour: "2-digit",
     minute: "2-digit",
   });
-
-// #TODO - CODEX SUGGESTION: Replace this synthetic plan generator with data returned from the orchestration backend.
-function synthesizePlan(opts: {
-  iteration: number;
-  resumeName?: string;
-  supplementalInfo?: string;
-  feedback?: string;
-}): PlanSection[] {
-  const { iteration, resumeName, supplementalInfo, feedback } = opts;
-  const resumeNote = resumeName ? ` anchored on ${resumeName}` : "";
-  const supplementalAvailable = Boolean(supplementalInfo?.trim());
-
-  const base: PlanSection[] = [
-    {
-      id: `intro-${iteration}`,
-      title: "Opening & Rapport",
-      description: `Quick check-in, align on the target role, and frame expectations${resumeNote}.`,
-    },
-    {
-      id: `technical-${iteration}`,
-      title: "Technical Challenge",
-      description:
-        "Live coding walkthrough with incremental checkpoints, emphasizing clarity of thought and trade-offs.",
-    },
-    {
-      id: `resume-${iteration}`,
-      title: "Resume Review & Storytelling",
-      description: supplementalAvailable
-        ? "Targeted follow-ups on key resume highlights with context-aware probes held behind the scenes."
-        : "Targeted follow-ups on key resume highlights—dig into impact, scope, and collaboration moments.",
-    },
-    {
-      id: `wrap-${iteration}`,
-      title: "Closing Feedback",
-      description:
-        "Actionable coaching, suggested resources, and plan for next steps after the session.",
-    },
-  ];
-
-  if (feedback) {
-    base.splice(2, 0, {
-      id: `feedback-${iteration}`,
-      title: "Feedback-Focused Probe",
-      description: `Incorporate feedback: “${feedback}”. Tailor targeted follow-ups and scenario prompts around this.`,
-    });
-  }
-
-  return base;
-}
 
 function planMessage(
   plan: PlanSection[],
@@ -135,8 +97,31 @@ function planMessage(
   return `${intro}\n\n${bullets}${extrasBlock}\n\nLet me know if you’d like to adjust anything else.`;
 }
 
-// #TODO - CODEX SUGGESTION: Swap this heuristic report with the backend-produced evaluation once integration lands.
-function synthesizeReport(opts: {
+// The new async function that calls the backend
+async function generateBackendReport(
+  plan: PlanSection[],
+  editorValue: string,
+): Promise<BackendFeedback> {
+  const payload: InterviewContext = {
+    plan: plan,
+    coding_question: editorValue, // Send the final code as the "question" for analysis
+  };
+
+  const response = await fetch("/generate_feedback", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json();
+    throw new Error(errorData.detail || "Failed to generate feedback");
+  }
+
+  return await response.json();
+}
+
+function synthesizeMockReport(opts: {
   plan: PlanSection[];
   transcript: InterviewUtterance[];
   editorValue: string;
@@ -164,9 +149,9 @@ function synthesizeReport(opts: {
     `Moved through ${plan.length} planned segments with ${interviewerTurns} interviewer prompts and ${candidateTurns} responses.`,
     codeLines.length
       ? `Authored ~${codeLines.length} lines in the workspace; opening focus: ${codeLines
-          .slice(0, 2)
-          .join(" ")
-          .slice(0, 120)}${codeLines.length > 2 ? "…" : "."}`
+        .slice(0, 2)
+        .join(" ")
+        .slice(0, 120)}${codeLines.length > 2 ? "…" : "."}`
       : "Relied primarily on verbal reasoning—no substantive code committed during this run.",
     `Kept alignment with the closing loop by acknowledging next steps before ending early.`,
   ];
@@ -181,7 +166,7 @@ function synthesizeReport(opts: {
   ];
 
   return {
-    overview: `Session wrapped manually after ${totalTurns} conversational turns—report generated on the fly.`,
+    overview: `Session wrapped manually after ${totalTurns} conversational turns.`,
     highlights,
     recommendations,
     nextSteps:
@@ -194,58 +179,22 @@ export default function HomePage() {
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(
     null,
   );
+  const [resumeFile, setResumeFile] = useState<File | null>(null);
   const [resumeFileName, setResumeFileName] = useState<string>("");
   const [resumeError, setResumeError] = useState<string | null>(null);
   const [supplementalInfo, setSupplementalInfo] = useState<string>("");
   const [planSections, setPlanSections] = useState<PlanSection[]>([]);
+  const [codingQuestion, setCodingQuestion] = useState<string>("");
   const [planIteration, setPlanIteration] = useState<number>(0);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [feedbackDraft, setFeedbackDraft] = useState<string>("");
   const [editorValue, setEditorValue] =
-    useState<string>(DEFAULT_EDITOR_VALUE);
+    useState<string>(DEFAULT_EDITOR_VALUE); // Use the default value
   const [transcript, setTranscript] = useState<InterviewUtterance[]>([]);
   const [interviewReport, setInterviewReport] =
     useState<InterviewReport | null>(null);
   const conversationEndRef = useRef<HTMLDivElement | null>(null);
 
-  useEffect(() => {
-    if (phase !== "thinking" || !pendingAction) {
-      return;
-    }
-
-    // #TODO - CODEX SUGGESTION: Await the backend planner result instead of relying on a timeout-based simulation.
-    const timer = setTimeout(() => {
-      if (pendingAction.type === "plan") {
-        const plan = synthesizePlan({
-          iteration: pendingAction.iteration,
-          resumeName: resumeFileName,
-          supplementalInfo,
-          feedback: pendingAction.feedback,
-        });
-
-        setPlanSections(plan);
-        setPlanIteration(pendingAction.iteration);
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: createId("assistant"),
-            role: "assistant",
-            content: planMessage(
-              plan,
-              pendingAction.iteration,
-              pendingAction.feedback,
-              supplementalInfo.trim().length > 0,
-              resumeFileName,
-            ),
-          },
-        ]);
-        setPhase("planning");
-        setPendingAction(null);
-      }
-    }, THINKING_DURATION_MS);
-
-    return () => clearTimeout(timer);
-  }, [pendingAction, phase, resumeFileName, supplementalInfo]);
 
   useEffect(() => {
     if (phase === "planning") {
@@ -293,7 +242,7 @@ export default function HomePage() {
 
   const thinkingSubhead = useMemo(() => {
     if (!pendingAction?.feedback) {
-      return "Pulling in role expectations, competencies, and Modal-flavored prompts.";
+      return "Pulling in role expectations, competencies, and your current skills.";
     }
     const clipped =
       pendingAction.feedback.length > 160
@@ -302,9 +251,10 @@ export default function HomePage() {
     return `Integrating your note: “${clipped}”`;
   }, [pendingAction]);
 
-  const handleWelcomeSubmit = (event: FormEvent<HTMLFormElement>) => {
+  // --- REPLACE THIS FUNCTION ---
+  const handleWelcomeSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!resumeFileName) {
+    if (!resumeFile) { // Check for the File object
       setResumeError("Please upload your resume to continue.");
       return;
     }
@@ -333,37 +283,65 @@ export default function HomePage() {
     };
 
     setMessages([userMessage, assistantAck]);
-    setPendingAction({ type: "plan", iteration: 0 });
+    const action: PendingAction = { type: "plan", iteration: 0 };
+    setPendingAction(action);
     setPhase("thinking");
-  };
 
-  const handleFeedbackSubmit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!feedbackDraft.trim() || phase !== "planning") {
-      return;
+    // --- Start Backend Integration ---
+    const formData = new FormData();
+    formData.append("resume", resumeFile);
+    formData.append("job_description", supplementalInfo.trim() || "No job description provided.");
+    formData.append("feedback", ""); // No feedback on first run
+
+    try {
+      const response = await fetch(PLANNER_URL, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || "Failed to generate plan");
+      }
+
+      // Destructure the new object
+      const context: InterviewContext = await response.json();
+      const plan = context.plan;
+
+      // Success: Update state with real plan from backend
+      setPlanSections(plan);
+      setCodingQuestion(context.coding_question);
+      setPlanIteration(action.iteration);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: createId("assistant"),
+          role: "assistant",
+          content: planMessage(
+            plan,
+            action.iteration,
+            undefined,
+            supplementalInfo.trim().length > 0,
+            resumeFileName,
+          ),
+        },
+      ]);
+      setPhase("planning");
+      setPendingAction(null);
+    } catch (error) {
+      console.error("Failed to fetch plan:", error);
+      const errorMessage =
+        error instanceof Error ? error.message : "An unknown error occurred.";
+      // Show error on the welcome screen
+      setResumeError(
+        `Error from backend: ${errorMessage}. Please try again.`,
+      );
+      // Revert to welcome screen
+      setPhase("welcome");
+      setMessages([]);
+      setPendingAction(null);
     }
-
-    const content = feedbackDraft.trim();
-    const userMessage: ChatMessage = {
-      id: createId("user"),
-      role: "user",
-      content,
-    };
-    const assistantAck: ChatMessage = {
-      id: createId("assistant"),
-      role: "assistant",
-      content:
-        "Heard. Let me reroute the plan with that feedback in mind for the next draft.",
-    };
-
-    setMessages((prev) => [...prev, userMessage, assistantAck]);
-    setFeedbackDraft("");
-    setPendingAction({
-      type: "plan",
-      iteration: planIteration + 1,
-      feedback: content,
-    });
-    setPhase("thinking");
+    // --- End Backend Integration ---
   };
 
   const handleAcceptPlan = () => {
@@ -377,6 +355,7 @@ export default function HomePage() {
           "Amazing. I’ll launch the live interview workspace—feel free to narrate your thought process once you’re ready.",
       },
     ]);
+    setEditorValue(codingQuestion);
 
     setTranscript([
       {
@@ -411,7 +390,7 @@ export default function HomePage() {
     ]);
   };
 
-  const handleEndInterview = () => {
+  const handleEndInterview = async () => {
     // #TODO - CODEX SUGGESTION: Persist the wrap-up through the backend and hydrate the report from its response.
     const closingExchange: InterviewUtterance[] = [
       {
@@ -432,24 +411,47 @@ export default function HomePage() {
 
     const updatedTranscript = [...transcript, ...closingExchange];
     setTranscript(updatedTranscript);
-    setInterviewReport(
-      synthesizeReport({
-        plan: planSections,
-        transcript: updatedTranscript,
+    try {
+      // 1. Try to get the real feedback from the backend
+      const feedback = await generateBackendReport(
+        planSections,
         editorValue,
-      }),
-    );
+      );
+
+      // 2. Success: Populate the report with real data
+      setInterviewReport({
+        overview: `Session complete. AI-generated feedback based on your code and our plan.`,
+        highlights: feedback.highlights,
+        recommendations: feedback.recommendations,
+        nextSteps:
+          "Review the feedback, then schedule another run or practice these concepts.",
+      });
+    } catch (error) {
+      console.error("Failed to generate backend report, using mock:", error);
+
+      // 3. Failure: Fall back to the original mock report
+      setInterviewReport(
+        synthesizeMockReport({
+          plan: planSections,
+          transcript: updatedTranscript,
+          editorValue,
+        }),
+      );
+    }
+
     setPhase("complete");
   };
 
   const resetExperience = () => {
     setPhase("welcome");
     setPendingAction(null);
+    setResumeFile(null);
     setResumeFileName("");
     setResumeError(null);
     setSupplementalInfo("");
     setPlanSections([]);
     setPlanIteration(0);
+    setCodingQuestion("");
     setMessages([]);
     setFeedbackDraft("");
     setEditorValue(DEFAULT_EDITOR_VALUE);
@@ -463,14 +465,14 @@ export default function HomePage() {
         <div className="w-full max-w-3xl rounded-3xl border border-white/10 bg-slate-900/60 p-10 shadow-2xl backdrop-blur">
           <header className="space-y-3">
             <p className="text-sm font-medium uppercase tracking-[0.2em] text-emerald-400/80">
-              Modal AI mock interview lab
+              Syntherview
             </p>
             <h1 className="text-4xl font-semibold tracking-tight">
               Prep with a voice-first AI interviewer
             </h1>
             <p className="text-sm text-slate-300">
               Upload your resume, add any job context, and let the system plan a
-              tailored session inspired by Modal’s voice agent stack.
+              tailored interview session.
             </p>
           </header>
 
@@ -492,14 +494,16 @@ export default function HomePage() {
                   </span>
                 </span>
                 <span className="text-xs text-slate-400">
-                  PDF, DOCX, or TXT — max 10MB
+                  PDF only — max 10MB
                 </span>
                 <input
                   type="file"
-                  accept=".pdf,.doc,.docx,.txt"
+                  accept=".pdf"
                   className="hidden"
                   onChange={(event) => {
                     const file = event.target.files?.[0];
+                    console.log("File selected:", file);
+                    setResumeFile(file ? file : null);
                     setResumeFileName(file ? file.name : "");
                     setResumeError(
                       file ? null : "Please upload your resume to continue.",
@@ -513,7 +517,7 @@ export default function HomePage() {
                 </p>
               ) : (
                 <p className="text-xs text-slate-400">
-                  Upload your resume to unlock the interview planner.
+                  Upload your resume to enable the interview planner.
                 </p>
               )}
               {resumeError && (
@@ -544,12 +548,11 @@ export default function HomePage() {
 
             <div className="flex flex-wrap items-center justify-between gap-4">
               <div className="text-xs text-slate-400">
-                Powered by Modal-inspired tooling. Voice I/O is simulated for
-                now.
+                Powered by Modal and OpenRouter.
               </div>
               <button
                 type="submit"
-                disabled={!resumeFileName}
+                disabled={!resumeFile}
                 className="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-emerald-500 via-emerald-400 to-cyan-400 px-6 py-3 text-sm font-semibold text-slate-950 shadow-lg transition hover:shadow-emerald-500/40 focus:outline-none focus:ring-2 focus:ring-emerald-300/70 focus:ring-offset-2 focus:ring-offset-slate-950 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 Generate interview plan
@@ -571,7 +574,7 @@ export default function HomePage() {
           </h2>
           <p className="mt-4 text-sm text-slate-300">{thinkingSubhead}</p>
           <p className="mt-8 text-xs uppercase tracking-[0.35em] text-slate-500">
-            Simulating {THINKING_DURATION_MS / 1000}-second Modal planning loop
+            Parsing your resume...
           </p>
         </div>
       </div>
@@ -584,7 +587,7 @@ export default function HomePage() {
         <div className="mx-auto flex max-w-6xl flex-col gap-8">
           <header className="flex flex-col gap-4 rounded-3xl border border-white/10 bg-slate-900/60 p-8 backdrop-blur">
             <p className="text-xs font-semibold uppercase tracking-[0.2em] text-emerald-400/80">
-              Interview plan draft {planIteration + 1}
+              Interview plan {planIteration + 1}
             </p>
             <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
               <h2 className="text-3xl font-semibold tracking-tight">
@@ -621,7 +624,7 @@ export default function HomePage() {
               <div className="flex items-center justify-between">
                 <h3 className="text-lg font-semibold">Planned flow</h3>
                 <span className="text-xs text-slate-400">
-                  Inspired by Modal’s Quillman voice orchestration
+                  Built from past interviews at major companies
                 </span>
               </div>
               <div className="flex flex-col gap-4">
@@ -652,67 +655,6 @@ export default function HomePage() {
                 Accept plan & start interview
               </button>
             </section>
-
-            <section className="flex flex-col gap-4 rounded-3xl border border-white/10 bg-slate-900/60 p-6 backdrop-blur">
-              <h3 className="text-lg font-semibold">Refine with the planner</h3>
-              <div className="flex-1 space-y-4 overflow-hidden">
-                <div className="max-h-[360px] overflow-y-auto pr-2">
-                  <div className="space-y-4">
-                    {messages.map((message) => (
-                      <div
-                        key={message.id}
-                        className={`flex ${
-                          message.role === "user"
-                            ? "justify-end"
-                            : "justify-start"
-                        }`}
-                      >
-                        <div
-                          className={`max-w-[90%] rounded-2xl border px-4 py-3 text-sm leading-relaxed ${
-                            message.role === "user"
-                              ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-100"
-                              : "border-white/10 bg-slate-800/70 text-slate-100"
-                          }`}
-                        >
-                          <p className="text-[10px] font-semibold uppercase tracking-[0.25em] text-slate-400">
-                            {message.role === "user" ? "You" : "Planner"}
-                          </p>
-                          <p className="mt-2 whitespace-pre-wrap">
-                            {message.content}
-                          </p>
-                        </div>
-                      </div>
-                    ))}
-                    <div ref={conversationEndRef} />
-                  </div>
-                </div>
-                <form
-                  onSubmit={handleFeedbackSubmit}
-                  className="space-y-3 rounded-2xl border border-white/10 bg-slate-950/50 p-4"
-                >
-                  <label
-                    htmlFor="plan-feedback"
-                    className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400"
-                  >
-                    Feedback or tweaks
-                  </label>
-                  <textarea
-                    id="plan-feedback"
-                    value={feedbackDraft}
-                    onChange={(event) => setFeedbackDraft(event.target.value)}
-                    placeholder="Ask for different question types, adjust focus areas, or request more/less structure."
-                    className="min-h-[110px] w-full rounded-xl border border-slate-800 bg-slate-900/70 px-4 py-3 text-sm text-slate-100 placeholder:text-slate-500 focus:border-emerald-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
-                  />
-                  <button
-                    type="submit"
-                    disabled={!feedbackDraft.trim()}
-                    className="inline-flex w-full items-center justify-center rounded-full border border-emerald-500/40 bg-emerald-500/15 px-4 py-2 text-sm font-semibold text-emerald-100 transition hover:bg-emerald-500/25 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-slate-800 disabled:text-slate-500"
-                  >
-                    Request plan revision
-                  </button>
-                </form>
-              </div>
-            </section>
           </div>
         </div>
       </div>
@@ -728,7 +670,7 @@ export default function HomePage() {
               Mock interview report
             </p>
             <h2 className="mt-3 text-3xl font-semibold tracking-tight">
-              Early wrap summary & coaching cues
+              Interview Summary & Coaching Cues
             </h2>
             <p className="mt-4 text-sm text-slate-300">
               {interviewReport.overview}
@@ -840,11 +782,11 @@ export default function HomePage() {
           </p>
           <div className="mt-3 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
             <h2 className="text-3xl font-semibold tracking-tight">
-              Coding canvas + voice interviewer
+              Coding Canvas
             </h2>
             <div className="flex items-center gap-3 text-xs text-slate-400">
               <span className="inline-flex h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-              Voice link simulated — reference Modal Quillman for real hookups
+              Voice link enabled
             </div>
           </div>
         </header>
@@ -852,7 +794,7 @@ export default function HomePage() {
         <div className="grid gap-6 lg:grid-cols-[minmax(0,1.9fr)_minmax(0,1fr)]">
           <section className="flex flex-col gap-4 rounded-3xl border border-white/10 bg-slate-900/60 p-6 backdrop-blur">
             <div className="flex items-center justify-between">
-              <h3 className="text-lg font-semibold">Coding workspace</h3>
+              <h3 className="text-lg font-semibold">Workspace</h3>
               <span className="text-xs text-slate-400">
                 Language: Python (Monaco editor)
               </span>
@@ -908,11 +850,10 @@ export default function HomePage() {
                 {transcript.map((entry) => (
                   <div
                     key={entry.id}
-                    className={`rounded-2xl border px-4 py-3 text-sm ${
-                      entry.speaker === "interviewer"
-                        ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-100"
-                        : "border-white/10 bg-slate-800/70 text-slate-100"
-                    }`}
+                    className={`rounded-2xl border px-4 py-3 text-sm ${entry.speaker === "interviewer"
+                      ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-100"
+                      : "border-white/10 bg-slate-800/70 text-slate-100"
+                      }`}
                   >
                     <div className="flex items-center justify-between text-[11px] uppercase tracking-[0.3em] text-slate-400">
                       <span>

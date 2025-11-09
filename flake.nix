@@ -43,6 +43,8 @@
               # if they already exist, mimicking the previous pip install --upgrade
               uv pip install \
                 fastapi \
+                python-multipart \
+                httpx \
                 numpy \
                 torch==2.8.0 \
                 modal || true
